@@ -16,24 +16,49 @@ def safe_filename(value: str) -> str:
 def choose_result(results, title, artist, auto_accept):
     if not results:
         return None
-    results = results[:8]
+
+    results = sorted(results, key=lambda item: item.score, reverse=True)[:8]
+
     if auto_accept:
-        return results[0]
+        best = results[0]
+
+        # Conservative initial threshold. Tune using actual test results.
+        if best.score >= 0.82:
+            return best
+
+        console.print(
+            f"[yellow]No sufficiently confident match for "
+            f"{title} — {artist}. Best score: {best.score:.0%}. "
+            "Skipping automatic download.[/yellow]"
+        )
+        return None
+
     console.print(f"\n[bold]Matches for {title} — {artist}[/bold]")
+
     for i, item in enumerate(results, 1):
-        console.print(f" {i}. [{item.score:.0%}] {item.title} — {item.artist} "
-                      f"[{item.version}] ({item.provider})")
-        if item.rights:
-            console.print(f"    Rights: {item.rights}")
+        console.print(
+            f" {i}. [{item.score:.0%}] {item.title} — "
+            f"{item.artist} ({item.provider})"
+        )
+        console.print(f"    Version: {item.version}")
+        console.print(f"    Rights: {item.rights or 'Unverified'}")
         console.print(f"    {item.url}")
+
     while True:
-        choice = console.input("Select match (1-8), s=skip this source, q=stop: ").strip().lower()
+        choice = console.input(
+            f"Select match (1-{len(results)}), "
+            "s=skip this source, q=stop: "
+        ).strip().lower()
+
         if choice == "s":
             return None
+
         if choice == "q":
             raise KeyboardInterrupt
+
         if choice.isdigit() and 1 <= int(choice) <= len(results):
-            return results[int(choice)-1]
+            return results[int(choice) - 1]
+
         console.print("[yellow]Invalid selection.[/yellow]")
 
 def run_queue(db, config, providers, auto_accept=False, only_failed=False):

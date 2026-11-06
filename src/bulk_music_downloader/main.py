@@ -44,10 +44,22 @@ def review():
     console.print(f"Total tracks: {len(rows)}")
 
 @app.command()
-def start(yes: bool = typer.Option(False, "--yes", help="Accept top search match without prompting.")):
+def start(
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        help="Ask me to select each search result instead of automatic matching.",
+    )
+):
     db, config = connect(), load_config()
     set_paused(db, False)
-    run_queue(db, config, build_providers(config), auto_accept=yes)
+
+    run_queue(
+        db,
+        config,
+        build_providers(config),
+        auto_accept=not interactive,
+    )
 
 @app.command()
 def pause():
