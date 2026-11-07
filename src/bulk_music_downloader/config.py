@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 
@@ -10,11 +11,18 @@ CONFIG_FILE = APP_DIR / "config.toml"
 
 DEFAULTS = {
     "download_dir": str(Path.home() / "Music" / "BulkDownloads"),
-    "providers": ["internet_archive", "tubidy", "direct_url"],
+    "providers": [
+        "audius",
+        "jamendo",
+        "internet_archive",
+        "direct_url",
+    ],
     "retries_per_provider": 3,
     "request_timeout": 30,
     "max_search_results": 8,
-    "user_agent": "BulkMusicDownloader/0.1 (+local personal downloader)",
+    "user_agent": "BulkMusicDownloader/0.2",
+    "jamendo_client_id": "",
+    "audius_api_key": "",
 }
 
 
@@ -34,14 +42,25 @@ def load_config() -> dict:
     if not CONFIG_FILE.exists():
         save_config(DEFAULTS)
 
-    with CONFIG_FILE.open("rb") as f:
-        loaded = tomllib.load(f)
+    with CONFIG_FILE.open("rb") as file:
+        loaded = tomllib.load(file)
 
     result = DEFAULTS.copy()
     result.update(loaded)
 
     result["download_dir"] = str(
         Path(result["download_dir"]).expanduser()
+    )
+
+    # Environment variables take precedence over the config file.
+    result["jamendo_client_id"] = (
+        os.getenv("JAMENDO_CLIENT_ID")
+        or result.get("jamendo_client_id", "")
+    )
+
+    result["audius_api_key"] = (
+        os.getenv("AUDIUS_API_KEY")
+        or result.get("audius_api_key", "")
     )
 
     return result
@@ -61,7 +80,7 @@ def save_config(config: dict) -> None:
 
         elif isinstance(value, list):
             rendered = "[" + ", ".join(
-                _quote(str(x)) for x in value
+                _quote(str(item)) for item in value
             ) + "]"
 
         else:
@@ -71,7 +90,7 @@ def save_config(config: dict) -> None:
 
     CONFIG_FILE.write_text(
         "\n".join(lines) + "\n",
-        encoding="utf-8"
+        encoding="utf-8",
     )
 
 
