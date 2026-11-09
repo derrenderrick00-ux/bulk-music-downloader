@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib import response
 
 import httpx
 
@@ -11,6 +12,21 @@ from ..models import SearchResult
 
 API = "https://api.jamendo.com/v3.0/tracks/"
 
+ROTATABLE_HTTP_STATUSES = {401, 403, 429}
+
+ROTATABLE_ERROR_TERMS = (
+    "invalid client",
+    "client_id",
+    "client id",
+    "unauthorized",
+    "forbidden",
+    "authentication",
+    "rate limit",
+    "rate-limit",
+    "too many requests",
+    "quota exceeded",
+)
+
 
 class JamendoProvider(MusicProvider):
     name = "jamendo"
@@ -19,27 +35,58 @@ class JamendoProvider(MusicProvider):
         self,
         client_id: str = "",
         user_agent: str = "BulkMusicDownloader/0.2",
+        client_ids: list[str] | None = None,
     ):
-        self.client_id = client_id
+        self.client_ids = self._normalize_client_ids(
+            client_ids or [client_id]
+        )
+
+        # Backward compatibility for code that reads client_id.
+        self.client_id = (
+            self.client_ids[0] if self.client_ids else ""
+        )
+
         self.headers = {
             "User-Agent": user_agent,
         }
 
-    def search(
-        self,
-        title: str,
-        artist: str,
-        limit: int = 8,
-    ) -> list[SearchResult]:
+    @staticmethod
+    def _normalize_client_ids(values) -> list[str]:
+        cleaned = []
+        seen = set()
 
-        if not self.client_id:
-            raise ProviderError(
-                "Jamendo requires a developer client ID. "
-                "Set JAMENDO_CLIENT_ID before searching."
-            )
+        for value in values:
+            if not isinstance(value, str):
+                continue
 
+            client_id = value.strip()
+
+            if client_id and client_id not in seen:
+                cleaned.append(client_id)
+                seen.add(client_id)
+
+        return cleaned
+
+    @staticmethod
+    def _is_rotatable_api_error(headers: dict) -> bool:
+        message = str(
+            headers.get("error_message", "")
+        ).lower()
+
+        code = str(
+            headers.get("code", "")
+        ).lower()
+
+        combined = f"{message} {code}"
+
+        return any(
+            term in combined
+            for term in ROTATABLE_ERROR_TERMS
+        )
+
+    def _request_payload(self, client_id: str, title: str, artist: str, limit: int):
         params = {
-            "client_id": self.client_id,
+            "client_id": client_id,
             "format": "json",
             "namesearch": title,
             "artist_name": artist,
@@ -57,27 +104,95 @@ class JamendoProvider(MusicProvider):
                 follow_redirects=True,
             )
 
-            response.raise_for_status()
+        except httpx.HTTPError:
+            raise ProviderError(
+                "Jamendo search failed due to a network error."
+            ) from None
+
+        # Some existing test doubles do not expose status_code.
+        # Treat those as successful responses for backward compatibility.
+        status_code = getattr(response, "status_code", 200)
+
+        if status_code in ROTATABLE_HTTP_STATUSES:
+            return None, True
+
+        if status_code >= 400:
+            raise ProviderError(
+                f"Jamendo search failed with HTTP {status_code}."
+            )
+
+        try:
             payload = response.json()
 
-        except Exception as exc:
+        except (ValueError, TypeError):
             raise ProviderError(
-                f"Jamendo search failed: {exc}"
-            ) from exc
+                "Jamendo returned invalid JSON."
+            ) from None
+
+        if not isinstance(payload, dict):
+            raise ProviderError(
+                "Jamendo returned an unexpected response."
+            )
 
         headers = payload.get("headers", {})
 
-        if headers.get("status") == "failed":
+        if not isinstance(headers, dict):
             raise ProviderError(
-                headers.get("error_message")
-                or "Jamendo reported a failed search."
+                "Jamendo returned malformed response headers."
+            )
+
+        if str(headers.get("status", "")).lower() == "failed":
+            if self._is_rotatable_api_error(headers):
+                return None, True
+
+            raise ProviderError(
+                "Jamendo reported a search failure."
+            )
+
+        return payload, False
+
+    def search(
+        self,
+        title: str,
+        artist: str,
+        limit: int = 8,
+    ) -> list[SearchResult]:
+
+        if not self.client_ids:
+            raise ProviderError(
+                "Jamendo requires a developer client ID. "
+                "Configure JAMENDO_CLIENT_ID or JAMENDO_CLIENT_IDS."
+            )
+
+        payload = None
+
+        for index, client_id in enumerate(self.client_ids):
+            payload, should_rotate = self._request_payload(
+                client_id,
+                title,
+                artist,
+                limit,
+            )
+
+            if not should_rotate:
+                break
+
+            # Every configured ID is attempted at most once.
+            if index == len(self.client_ids) - 1:
+                raise ProviderError(
+                    "Jamendo rejected all configured client IDs."
+                )
+
+        if payload is None:
+            raise ProviderError(
+                "Jamendo search could not be completed."
             )
 
         tracks = payload.get("results", [])
 
         if not isinstance(tracks, list):
             raise ProviderError(
-                "Jamendo returned an unexpected response."
+                "Jamendo returned an unexpected results structure."
             )
 
         results = []
@@ -103,7 +218,6 @@ class JamendoProvider(MusicProvider):
             allowed = track.get("audiodownload_allowed")
             download_url = track.get("audiodownload") or ""
 
-            # Require both the explicit permission flag and URL.
             if allowed is True and download_url:
                 rights_status = "permitted"
                 permitted = True
@@ -230,5 +344,5 @@ class JamendoProvider(MusicProvider):
                 raise
 
             raise ProviderError(
-                f"Jamendo download failed: {exc}"
-            ) from exc
+                "Jamendo download failed."
+            ) from None

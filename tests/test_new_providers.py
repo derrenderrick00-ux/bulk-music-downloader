@@ -72,6 +72,80 @@ def test_audius_search_preserves_restricted_permission(monkeypatch):
     assert results[0].rights_status == "restricted"
 
 
+def test_audius_search_falls_back_to_title_only(monkeypatch):
+    calls = []
+
+    def fake_request(self, endpoint, params=None, timeout=30):
+        calls.append(params["query"])
+
+        if len(calls) == 1:
+            return {"data": []}
+
+        return {
+            "data": [
+                {
+                    "id": "fallback-123",
+                    "title": "Test Song",
+                    "is_downloadable": True,
+                    "user": {
+                        "name": "Test Artist",
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        AudiusProvider,
+        "_request",
+        fake_request,
+    )
+
+    results = AudiusProvider().search(
+        "Test Song",
+        "Test Artist",
+    )
+
+    assert calls == [
+        "Test Song Test Artist",
+        "Test Song",
+    ]
+
+    assert len(results) == 1
+    assert results[0].identifier == "fallback-123"
+    assert results[0].download_allowed is True
+    assert results[0].rights_status == "permitted"
+
+
+def test_audius_search_handles_malformed_user_metadata(monkeypatch):
+    def fake_request(self, endpoint, params=None, timeout=30):
+        return {
+            "data": [
+                {
+                    "id": "malformed-123",
+                    "title": "Test Song",
+                    "is_downloadable": True,
+                    "user": "unexpected-value",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        AudiusProvider,
+        "_request",
+        fake_request,
+    )
+
+    results = AudiusProvider().search(
+        "Test Song",
+        "Test Artist",
+    )
+
+    assert len(results) == 1
+    assert results[0].identifier == "malformed-123"
+    assert results[0].artist == ""
+    assert results[0].download_allowed is True
+
+
 def test_audius_download_rejects_unapproved_track(tmp_path):
     provider = AudiusProvider()
 

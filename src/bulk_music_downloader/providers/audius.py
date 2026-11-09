@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -48,31 +47,14 @@ class AudiusProvider(MusicProvider):
                 f"Audius API request failed: {exc}"
             ) from exc
 
-    def search(
+    def _parse_tracks(
         self,
+        tracks: list,
         title: str,
         artist: str,
-        limit: int = 8,
     ) -> list[SearchResult]:
-
-        query = f"{title} {artist}".strip()
-
-        payload = self._request(
-            "/tracks/search",
-            params={
-                "query": query,
-                "limit": min(max(int(limit), 1), 100),
-            },
-        )
-
-        tracks = payload.get("data", [])
-
-        if not isinstance(tracks, list):
-            raise ProviderError(
-                "Audius returned an unexpected search response."
-            )
-
         results = []
+        seen_ids = set()
 
         for track in tracks:
             if not isinstance(track, dict):
@@ -81,21 +63,36 @@ class AudiusProvider(MusicProvider):
             identifier = track.get("id")
             found_title = track.get("title")
 
-            user = track.get("user") or {}
+            if not identifier or not found_title:
+                continue
+
+            identifier = str(identifier)
+
+            if identifier in seen_ids:
+                continue
+
+            seen_ids.add(identifier)
+
+            # The API may return null or malformed user metadata.
+            user = track.get("user")
+
+            if not isinstance(user, dict):
+                user = {}
+
             found_artist = (
                 user.get("name")
                 or user.get("handle")
                 or ""
             )
 
-            if not identifier or not found_title:
-                continue
+            found_title = str(found_title)
+            found_artist = str(found_artist)
 
             details = match_details(
                 title,
                 artist,
-                str(found_title),
-                str(found_artist),
+                found_title,
+                found_artist,
             )
 
             downloadable = track.get("is_downloadable")
@@ -117,7 +114,8 @@ class AudiusProvider(MusicProvider):
                 )
             else:
                 page_url = (
-                    f"https://audius.co/track/{quote(str(identifier))}"
+                    f"https://audius.co/track/"
+                    f"{quote(identifier)}"
                 )
 
             license_value = track.get("license")
@@ -125,9 +123,9 @@ class AudiusProvider(MusicProvider):
             results.append(
                 SearchResult(
                     provider=self.name,
-                    identifier=str(identifier),
-                    title=str(found_title),
-                    artist=str(found_artist),
+                    identifier=identifier,
+                    title=found_title,
+                    artist=found_artist,
                     url=page_url,
                     media_type="audio",
                     rights=(
@@ -138,13 +136,75 @@ class AudiusProvider(MusicProvider):
                     score=details["score"],
                     title_score=details["title_score"],
                     artist_score=details["artist_score"],
-                    version=detect_version(str(found_title)),
+                    version=detect_version(found_title),
                     version_match=details["version_match"],
                     download_allowed=downloadable,
                     rights_status=rights_status,
                     metadata=track,
                 )
             )
+
+        return results
+
+    def search(
+        self,
+        title: str,
+        artist: str,
+        limit: int = 8,
+    ) -> list[SearchResult]:
+
+        normalized_title = title.strip()
+        normalized_artist = artist.strip()
+
+        combined_query = (
+            f"{normalized_title} {normalized_artist}"
+        ).strip()
+
+        queries = [combined_query]
+
+        # Only perform title-only fallback when it is genuinely
+        # a different query.
+        if normalized_title and normalized_title != combined_query:
+            queries.append(normalized_title)
+
+        bounded_limit = min(
+            max(int(limit), 1),
+            100,
+        )
+
+        results = []
+
+        for query in queries:
+            payload = self._request(
+                "/tracks/search",
+                params={
+                    "query": query,
+                    "limit": bounded_limit,
+                },
+            )
+
+            if not isinstance(payload, dict):
+                raise ProviderError(
+                    "Audius returned an unexpected search response."
+                )
+
+            tracks = payload.get("data", [])
+
+            if not isinstance(tracks, list):
+                raise ProviderError(
+                    "Audius returned an unexpected search response."
+                )
+
+            results = self._parse_tracks(
+                tracks,
+                normalized_title,
+                normalized_artist,
+            )
+
+            # The title-only query is attempted only when the
+            # combined query produced no usable track records.
+            if results:
+                break
 
         return sorted(
             results,
@@ -179,6 +239,7 @@ class AudiusProvider(MusicProvider):
         )
 
         metadata = result.metadata or {}
+
         original_name = str(
             metadata.get("orig_filename") or ""
         )
